@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"log"
+	"os"
 	"os/exec"
 	"syscall"
 
@@ -13,7 +14,14 @@ import (
 )
 
 func startHaproxyProcess() (*exec.Cmd, error) {
+
+	fd, err := os.OpenFile("haproxy-stuff/logs/stdout.log",
+		os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0600)
+	if err != nil {
+		return nil, err
+	}
 	cmd := exec.Command("./haproxy-stuff/bin/haproxy", "-W", "-f", "haproxy-stuff/conf/haproxy.cfg")
+	cmd.Stdout = fd
 
 	if err := cmd.Start(); err != nil {
 		return nil, err

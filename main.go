@@ -2,8 +2,10 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"net/url"
 	"os/exec"
+	"sync"
 	"time"
 
 	client_native "github.com/haproxytech/client-native/v2"
@@ -45,8 +47,11 @@ func watchdog(logger *zap.Logger, client *client_native.HAProxyClient, cmd *exec
 	if err := getNewProxies(logger, conf); err != nil {
 		logger.Error("couldn't get new proxies", zap.Error(err))
 	}
+	if err := testCurrentProxies(logger, conf, cmd, checkURL); err != nil {
+		logger.Error("couldn't get check current proxies", zap.Error(err))
+	}
 
-	cpTicker := time.Tick(time.Second * 10)
+	cpTicker := time.Tick(time.Second * 30)
 	npTicker := time.Tick(time.Minute * 1)
 
 	for {
@@ -94,10 +99,91 @@ func testCurrentProxies(
 		return err
 	}
 
+	var srvresMtx sync.Mutex
+	srvres := make(map[*models.Server]*ProxyTestResult, 0)
+
+	var wg sync.WaitGroup
 	for _, srv := range servers {
-		lgs := logger.With(zap.String("name", srv.Name), zap.String("address", srv.Address), zap.Int64("port", *srv.Port))
-		lgs.Debug("examining server")
+		wg.Add(1)
+		go func(srv *models.Server) {
+			defer wg.Done()
+
+			lgs := logger.With(zap.String("name", srv.Name))
+			lgs.Debug("examining server",
+				zap.String("address", srv.Address), zap.Int64("port", *srv.Port))
+
+			ans, err := testProxy(lgs, srv, target)
+			if err != nil {
+				lgs.Error("something went wrong in test proxy", zap.Error(err))
+				// If this errors something is very wrong.
+				// return err
+				return
+			}
+			lgs.Debug("got ans", zap.Reflect("ans", ans))
+
+			srvresMtx.Lock()
+			srvres[srv] = ans
+			srvresMtx.Unlock()
+
+		}(srv)
 	}
+	wg.Wait()
+
+	// Now we can decide which ones we want to enable or disable
+	serverAction := make(map[*models.Server]string, 0)
+
+	// We map over these to remove any who failed
+	for srv, pt := range srvres {
+		// The once that fail we delete for now
+		if pt.Failed {
+			serverAction[srv] = "delete"
+		}
+
+		if pt.TotalDur > 2*time.Second || pt.StatusCode != http.StatusOK {
+			if srv.Maintenance == "enabled" {
+				// Remove the proxy second time around
+				serverAction[srv] = "delete"
+			} else {
+				srv.Maintenance = "enabled"
+				serverAction[srv] = "edit"
+			}
+		}
+
+		// Now we enabled the ones which are left
+		if srv.Maintenance == "enabled" {
+			srv.Maintenance = "disabled"
+			serverAction[srv] = "edit"
+		}
+	}
+
+	// Here we edit the servers.
+	for srv, action := range serverAction {
+		if action == "edit" {
+			if err := conf.EditServer(srv.Name, "sk-backend", srv, trans.ID, 0); err != nil {
+				return err
+			}
+		} else if action == "delete" {
+			if err := conf.DeleteServer(srv.Name, "sk-backend", trans.ID, 0); err != nil {
+				return err
+			}
+		} else {
+			logger.Error("We don't know this value", zap.String("action", action))
+		}
+	}
+
+	if len(serverAction) < 0 {
+		return nil
+	}
+
+	if _, err := conf.CommitTransaction(trans.ID); err != nil {
+		return err
+	}
+	logger.Debug("commited transaction", zap.String("tid", trans.ID))
+
+	if err := reloadHaproxyProcess(cmd); err != nil {
+		return err
+	}
+	logger.Debug("Reloaded haproxy process")
 
 	return nil
 }
