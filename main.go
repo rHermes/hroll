@@ -8,31 +8,43 @@ import (
 
 	client_native "github.com/haproxytech/client-native/v2"
 	"github.com/haproxytech/models/v2"
+	"go.uber.org/zap"
 )
 
 func main() {
+	// Create logger
+	logger, err := getLogger()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer logger.Sync()
+
+	logger.Info("Starting haproxy process")
 	cmd, err := startHaproxyProcess()
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal("failed to start HaproxyProcess", zap.Error(err))
 	}
 
+	logger.Info("Creating haproxy client")
 	client, err := getHaproxyClient()
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal("Failed to create haproxy client", zap.Error(err))
 	}
 
-	if err := watchdog(client, cmd); err != nil {
-		log.Fatal(err)
+	logger.Info("Starting watchdog")
+	if err := watchdog(logger, client, cmd); err != nil {
+		logger.Fatal("Watchdog failed", zap.Error(err))
 	}
-
 }
 
-func watchdog(client *client_native.HAProxyClient, cmd *exec.Cmd) error {
+func watchdog(logger *zap.Logger, client *client_native.HAProxyClient, cmd *exec.Cmd) error {
 	conf := client.GetConfiguration()
 
-	checkUrl := mustParseUrl("https://httpbin.org/anything")
+	checkURL := mustParseURL("https://httpbin.org/anything")
 
-	getNewProxies(conf)
+	if err := getNewProxies(logger, conf); err != nil {
+		logger.Error("couldn't get new proxies", zap.Error(err))
+	}
 
 	cpTicker := time.Tick(time.Second * 10)
 	npTicker := time.Tick(time.Minute * 1)
@@ -40,16 +52,15 @@ func watchdog(client *client_native.HAProxyClient, cmd *exec.Cmd) error {
 	for {
 		select {
 		case <-npTicker:
-			log.Printf("We will check for new proxies\n")
-			err := getNewProxies(conf)
+			err := getNewProxies(logger, conf)
 			if err != nil {
-				log.Printf("We had an error: %s\n", err.Error())
+				logger.Error("couldn't get new proxies", zap.Error(err))
 			}
 		case <-cpTicker:
-			log.Printf("We will check current proxies\n")
-			err := testCurrentProxies(conf, cmd, checkUrl)
+			logger.Debug("We are checking current proxies")
+			err := testCurrentProxies(logger, conf, cmd, checkURL)
 			if err != nil {
-				log.Printf("We had an error: %s\n", err.Error())
+				logger.Error("couldn't test current proxies", zap.Error(err))
 			}
 		}
 	}
@@ -57,7 +68,9 @@ func watchdog(client *client_native.HAProxyClient, cmd *exec.Cmd) error {
 	return nil
 }
 
-func testCurrentProxies(conf client_native.IConfigurationClient,
+func testCurrentProxies(
+	logger *zap.Logger,
+	conf client_native.IConfigurationClient,
 	cmd *exec.Cmd, target *url.URL) error {
 	version, err := conf.GetVersion("")
 	if err != nil {
@@ -68,7 +81,12 @@ func testCurrentProxies(conf client_native.IConfigurationClient,
 	if err != nil {
 		return err
 	}
-	defer conf.DeleteTransaction(trans.ID)
+	defer func() {
+		logger.Debug("deleting transaction", zap.String("tid", trans.ID))
+		conf.DeleteTransaction(trans.ID)
+	}()
+
+	logger.Debug("starting transaction", zap.String("tid", trans.ID))
 
 	// Here we must get current proxies
 	_, servers, err := conf.GetServers("sk-backend", trans.ID)
@@ -76,14 +94,19 @@ func testCurrentProxies(conf client_native.IConfigurationClient,
 		return err
 	}
 
-	for _, server := range servers {
-		log.Printf("Examining server: %s\n", server.Address)
+	for _, srv := range servers {
+		lgs := logger.With(zap.String("name", srv.Name), zap.String("address", srv.Address), zap.Int64("port", *srv.Port))
+		lgs.Debug("examining server")
 	}
 
 	return nil
 }
 
-func getNewProxies(conf client_native.IConfigurationClient) error {
+func getNewProxies(
+	logger *zap.Logger,
+	conf client_native.IConfigurationClient) error {
+	logger.Info("We are checking for new proxies")
+
 	version, err := conf.GetVersion("")
 	if err != nil {
 		return err
@@ -93,7 +116,12 @@ func getNewProxies(conf client_native.IConfigurationClient) error {
 	if err != nil {
 		return err
 	}
-	defer conf.DeleteTransaction(trans.ID)
+	defer func() {
+		logger.Debug("deleting transaction", zap.String("tid", trans.ID))
+		conf.DeleteTransaction(trans.ID)
+	}()
+
+	logger.Debug("starting transaction", zap.String("tid", trans.ID))
 
 	xproxies, err := getFireXProxies()
 	if err != nil {
@@ -122,7 +150,7 @@ OUTER:
 		srv := &models.Server{
 			Address:     xprox.Server,
 			Port:        pInt64(int64(xprox.Port)),
-			Name:        genRandomName(),
+			Name:        genSecureRandomName(),
 			Maintenance: "enabled",
 		}
 		newServers = append(newServers, srv)
@@ -134,6 +162,11 @@ OUTER:
 
 	// If there are new servers we add them.
 	for _, srv := range newServers {
+		logger.Info("adding server to haproxy",
+			zap.String("name", srv.Name),
+			zap.String("address", srv.Address),
+			zap.Int64("port", *srv.Port))
+
 		if err := conf.CreateServer("sk-backend", srv, trans.ID, 0); err != nil {
 			return err
 		}
@@ -142,6 +175,7 @@ OUTER:
 	if _, err := conf.CommitTransaction(trans.ID); err != nil {
 		return err
 	}
+	logger.Debug("commited transaction", zap.String("tid", trans.ID))
 
 	return nil
 }

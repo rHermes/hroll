@@ -8,5 +8,6 @@ require (
 	github.com/haproxytech/models/v2 v2.0.1
 	github.com/mitchellh/mapstructure v1.3.0 // indirect
 	go.mongodb.org/mongo-driver v1.3.3 // indirect
+	go.uber.org/zap v1.15.0
 	golang.org/x/net v0.0.0-20200506145744-7e3656a0809f // indirect
 )
