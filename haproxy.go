@@ -2,15 +2,29 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"log"
-	"net/url"
+	"os/exec"
+	"syscall"
 
 	client_native "github.com/haproxytech/client-native/v2"
 	"github.com/haproxytech/client-native/v2/configuration"
 	"github.com/haproxytech/client-native/v2/runtime"
 	"github.com/haproxytech/models/v2"
 )
+
+func startHaproxyProcess() (*exec.Cmd, error) {
+	cmd := exec.Command("./haproxy-stuff/bin/haproxy", "-W", "-f", "haproxy-stuff/conf/haproxy.cfg")
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	return cmd, nil
+}
+
+func reloadHaproxyProcess(cmd *exec.Cmd) error {
+	return cmd.Process.Signal(syscall.SIGUSR2)
+}
 
 func getHaproxyClient() (*client_native.HAProxyClient, error) {
 	confClient := &configuration.Client{}
@@ -98,22 +112,4 @@ func setupBaseConfig(conf client_native.IConfigurationClient) error {
 	log.Printf("Commited txn %s, status: %s\n", mtrans.ID, mtrans.Status)
 
 	return nil
-}
-
-func haGetCurrentProxies(conf client_native.IConfigurationClient, name string) ([]*url.URL, error) {
-	_, servs, err := conf.GetServers(name, "")
-	if err != nil {
-		return nil, err
-	}
-
-	uls := make([]*url.URL, 0)
-	for _, srv := range servs {
-		log.Printf("We have a server: %s\n", srv.Address)
-		ul, err := url.Parse(fmt.Sprintf("socks5://%s:%d", srv.Address, srv.Port))
-		if err != nil {
-			return nil, err
-		}
-		uls = append(uls, ul)
-	}
-	return uls, nil
 }
