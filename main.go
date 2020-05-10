@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"sort"
 	"sync"
 	"time"
 
@@ -132,14 +133,17 @@ func testCurrentProxies(
 	// Now we can decide which ones we want to enable or disable
 	serverAction := make(map[*models.Server]string, 0)
 
+	goodOnes := make([]*models.Server, 0)
 	// We map over these to remove any who failed
 	for srv, pt := range srvres {
 		// The once that fail we delete for now
 		if pt.Failed {
 			serverAction[srv] = "delete"
+			continue
 		}
 
-		if pt.TotalDur > 2*time.Second || pt.StatusCode != http.StatusOK {
+		// We delete the once which doesn't have the best thing
+		if pt.StatusCode != http.StatusOK {
 			if srv.Maintenance == "enabled" {
 				// Remove the proxy second time around
 				serverAction[srv] = "delete"
@@ -147,6 +151,7 @@ func testCurrentProxies(
 				srv.Maintenance = "enabled"
 				serverAction[srv] = "edit"
 			}
+			continue
 		}
 
 		// Now we enabled the ones which are left
@@ -154,6 +159,27 @@ func testCurrentProxies(
 			srv.Maintenance = "disabled"
 			serverAction[srv] = "edit"
 		}
+
+		goodOnes = append(goodOnes, srv)
+	}
+
+	// Now we pick the 3 best which haven't failed and isn't slow
+	// TODO(rhermes): Limit to 3 best proxies
+
+	sort.Slice(goodOnes, func(i, j int) bool {
+		si := goodOnes[i]
+		sj := goodOnes[j]
+
+		return srvres[si].TotalDur < srvres[sj].TotalDur
+	})
+
+	// TODO(rHermes): Consider adding the other ones as backups
+	for i, srv := range goodOnes {
+		if i < 3 {
+			continue
+		}
+		srv.Maintenance = "enabled"
+		serverAction[srv] = "edit"
 	}
 
 	// Here we edit the servers.
@@ -171,7 +197,7 @@ func testCurrentProxies(
 		}
 	}
 
-	if len(serverAction) < 0 {
+	if len(serverAction) == 0 {
 		return nil
 	}
 

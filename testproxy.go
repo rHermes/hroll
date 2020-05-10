@@ -42,7 +42,7 @@ func testProxy(logger *zap.Logger, srv *models.Server, target *url.URL) (*ProxyT
 	}
 	cl := &http.Client{
 		Transport: tra,
-		Timeout:   5 * time.Second,
+		Timeout:   10 * time.Second,
 	}
 	defer cl.CloseIdleConnections()
 
